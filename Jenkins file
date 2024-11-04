@@ -1,0 +1,112 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE = "myapp:${env.BUILD_ID}"
+        REGISTRY = "your_ecr_registry" // Specify your ECR registry
+        SLACK_WEBHOOK_URL = "your_slack_webhook_url" // Replace with your Slack webhook URL
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                git branch: "${env.BRANCH_NAME}", url: 'your_repo_url' // Replace with your repository URL
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    docker.build(DOCKER_IMAGE)
+                }
+            }
+        }
+
+        stage('Static Code Analysis') {
+            steps {
+                script {
+                    // Run your static analysis tool, e.g., ESLint, SonarQube, etc.
+                    sh 'npm run lint'
+                }
+            }
+        }
+
+        stage('Run Tests & Check Coverage') {
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        script {
+                            sh 'npm test -- --coverage --reporter=json'
+                        }
+                    }
+                }
+
+                stage('Check Code Coverage') {
+                    steps {
+                        script {
+                            def coverage = sh(script: 'jq ".total.statements.pct" coverage/coverage-summary.json', returnStdout: true).trim()
+                            echo "Code Coverage: ${coverage}"
+                            if (coverage.toFloat() < 80) {
+                                currentBuild.result = 'FAILURE'
+                                notifyFailure("Code coverage is below 80%.")
+                                error("Pipeline terminated due to low code coverage.")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Scan Image for Vulnerabilities') {
+            steps {
+                script {
+                    // Run your image scanning tool, e.g., Trivy
+                    sh "trivy image ${DOCKER_IMAGE} --exit-code 1"
+                }
+            }
+        }
+
+        stage('Deploy to Dev') {
+            steps {
+                script {
+                    sh "kubectl apply -f k8s/dev/deployment.yaml"
+                }
+            }
+        }
+
+        stage('Deploy to QA') {
+            steps {
+                script {
+                    sh "kubectl apply -f k8s/qa/deployment.yaml"
+                }
+            }
+        }
+
+        stage('Deploy to Prod') {
+            steps {
+                input message: 'Approve Production Deployment?', ok: 'Deploy'
+                script {
+                    sh "kubectl apply -f k8s/prod/deployment.yaml"
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs()
+        }
+        failure {
+            script {
+                notifyFailure("Pipeline failed!")
+            }
+        }
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+    }
+}
+
+def notifyFailure(String message) {
+    sh "curl -X POST -H 'Content-type: application/json' --data '{\"text\":\"${message}\"}' ${SLACK_WEBHOOK_URL}"
+}
